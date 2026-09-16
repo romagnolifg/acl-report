@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ACL Report</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="app-header">
+    <div class="app-title">
+      <h1>ACL Report</h1>
+      <p class="app-subtitle">Access control lists reported by the filesystem scan.</p>
+    </div>
+    <p id="status-bar" class="status-bar" role="status" aria-live="polite">Loading status&hellip;</p>
+  </header>
+
+  <nav class="tabs" id="tablist" role="tablist" aria-label="Report views">
+    <button class="tab" id="tab-explore" role="tab" aria-controls="panel-explore"
+            aria-selected="true" tabindex="0" data-view="explore">Explore</button>
+    <button class="tab" id="tab-principals" role="tab" aria-controls="panel-principals"
+            aria-selected="false" tabindex="-1" data-view="principals">Principals</button>
+  </nav>
+
+  <main id="main">
+    <section class="panel" id="panel-explore" role="tabpanel" aria-labelledby="tab-explore" tabindex="-1">
+      <div class="explore-layout">
+        <div class="tree-pane">
+          <form class="search-form" id="path-search-form" role="search" aria-label="Search paths">
+            <label class="field-label" for="path-search-input">Search paths</label>
+            <div class="search-row">
+              <input class="text-input" id="path-search-input" name="q" type="search"
+                     autocomplete="off" placeholder="e.g. finance, /srv/data">
+              <button class="button" type="submit">Search</button>
+            </div>
+          </form>
+          <div class="search-results" id="path-search-results" hidden></div>
+
+          <div class="pane-header">
+            <h2 class="pane-title" id="tree-heading">Folders</h2>
+            <button class="button button-quiet" type="button" id="tree-refresh">Refresh</button>
+          </div>
+          <div class="tree" id="tree" aria-labelledby="tree-heading"></div>
+        </div>
+
+        <div class="detail-pane" id="detail-pane" aria-live="polite">
+          <p class="placeholder">Select a folder to see its ACL entries, rights and scan errors.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-principals" role="tabpanel" aria-labelledby="tab-principals" tabindex="-1" hidden>
+      <p class="notice" role="note">
+        <span class="badge badge-info">Direct entries only</span>
+        These results are the objects where the principal appears <strong>directly</strong> in an
+        access control list. They are <strong>not</strong> effective access: group membership,
+        inherited entries and deny precedence are not applied.
+      </p>
+
+      <form class="search-form" id="principal-search-form" role="search" aria-label="Search principals">
+        <label class="field-label" for="principal-search-input">Search users and groups</label>
+        <div class="search-row">
+          <input class="text-input" id="principal-search-input" name="q" type="search"
+                 autocomplete="off" placeholder="e.g. alice, wheel, S-1-5-32-544">
+          <button class="button" type="submit">Search</button>
+        </div>
+      </form>
+      <div class="search-results" id="principal-search-results" hidden></div>
+
+      <div class="detail-pane" id="principal-detail" aria-live="polite">
+        <p class="placeholder">Search for a principal, then choose it to list the ACL entries that name it directly.</p>
+      </div>
+    </section>
+  </main>
+
+  <noscript><p class="notice">This report needs JavaScript enabled.</p></noscript>
+  <script src="app.js"></script>
+</body>
+</html>

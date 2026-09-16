@@ -1,0 +1,31 @@
+*.db
+
+# SQLite journals and WAL sidecars (created during writes; a *.db glob misses them)
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Importer temporary build files (prefix ".acl-import-", swapped in atomically)
+.acl-import-*.tmp
+
+# Scanner output. These hold the real ACL inventory and must never be published.
+# Files: inventory.jsonl manifest.jsonl manifest-meta.json paths.csv aces.csv
+# errors.jsonl summary.json, written to an output directory per scan.
+inventory.jsonl
+manifest.jsonl
+manifest-meta.json
+paths.csv
+aces.csv
+errors.jsonl
+summary.json
+asustor-acl-inventory-*/
+
+# Credentials
+adm-password
+*.pem
+
+# Python cruft
+__pycache__/
+*.py[cod]
+.venv/
+venv/
