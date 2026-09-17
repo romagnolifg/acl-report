@@ -40,6 +40,7 @@ MAX_LIMIT = 200          # hard cap for search/principal paging
 DEFAULT_LIMIT = 50
 MAX_CHILDREN_LIMIT = 5000
 DEFAULT_CHILDREN_LIMIT = 2000
+MAX_ANCESTOR_DEPTH = 1024   # recursion cap; node chains are far shallower
 MAX_Q_LEN = 200
 MAX_KEY_LEN = 512
 
@@ -275,6 +276,33 @@ def q_search_paths(conn, q, limit):
     return {"query": q, "results": results, "count": len(results)}
 
 
+def q_ancestors(conn, node_id):
+    """Root-to-target chain for a node, using a parent_id recursive CTE.
+
+    The recursion is depth-capped so a malformed cycle in the data cannot
+    spin forever; the cap is far above any real path depth.
+    """
+    rows = conn.execute(
+        "WITH RECURSIVE chain(id, parent_id, level) AS ("
+        "  SELECT n.id, n.parent_id, 0 FROM nodes n WHERE n.id = ?"
+        "  UNION ALL"
+        "  SELECT p.id, p.parent_id, chain.level + 1"
+        "    FROM nodes p JOIN chain ON p.id = chain.parent_id"
+        "   WHERE chain.level < ?"
+        ") SELECT %s FROM chain JOIN nodes n ON n.id = chain.id"
+        " ORDER BY chain.level DESC" % _NODE_COLS,
+        (node_id, MAX_ANCESTOR_DEPTH),
+    ).fetchall()
+    if not rows:
+        raise ApiError(404, "node_not_found", "No node with id %d" % node_id)
+    ancestors = []
+    for row in rows:
+        item = dict(row)
+        item["has_children"] = bool(item["has_children"])
+        ancestors.append(item)
+    return {"ancestors": ancestors}
+
+
 def q_search_principals(conn, q, limit):
     key_pattern = _like_contains(q.casefold())
     name_pattern = _like_contains(q)
@@ -485,6 +513,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/status": lambda qs: self._query(q_status),
             "/api/children": self._api_children,
             "/api/node": self._api_node,
+            "/api/ancestors": self._api_ancestors,
             "/api/search/paths": self._api_search_paths,
             "/api/search/principals": self._api_search_principals,
             "/api/principal": self._api_principal,
@@ -502,6 +531,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_node(self, qs):
         node_id = param_int(qs, "id", required=True, minimum=0)
         return self._query(q_node, node_id)
+
+    def _api_ancestors(self, qs):
+        node_id = param_int(qs, "id", required=True, minimum=0)
+        return self._query(q_ancestors, node_id)
 
     def _api_search_paths(self, qs):
         q = param_q(qs)
@@ -730,6 +763,32 @@ def _pure_self_test(db_path):
         assert len(od["scan_errors"]) == 1 and od["scan_errors"][0]["node_id"] == 4
         assert od["node"]["acl_success"] == 0 and od["node"]["has_scan_error"] == 1
 
+        chain = q_ancestors(conn, 3)["ancestors"]
+        assert [a["id"] for a in chain] == [1, 2, 3], chain  # exact root -> target order
+        assert [a["path"] for a in chain] == ["/data", "/data/team", "/data/team/docs"], chain
+        assert [a["depth"] for a in chain] == [0, 1, 2], chain
+        assert [a["has_children"] for a in chain] == [True, True, False], chain
+        assert [a["id"] for a in q_ancestors(conn, 1)["ancestors"]] == [1]  # root is its own chain
+        assert [a["id"] for a in q_ancestors(conn, 4)["ancestors"]] == [1, 4]
+        try:
+            q_ancestors(conn, 99999)
+            raise AssertionError("expected ApiError")
+        except ApiError as exc:
+            assert exc.status == 404 and exc.code == "node_not_found"
+
+        # Defensive: a malformed parent cycle must terminate at the depth cap.
+        cycle = sqlite3.connect(":memory:")
+        cycle.row_factory = sqlite3.Row
+        try:
+            cycle.executescript(SCHEMA_SQL)
+            cycle.execute(
+                "INSERT INTO nodes(id, parent_id, path, name, depth, ace_count, has_scan_error)"
+                " VALUES(1, 2, '/a', 'a', 0, 0, 0), (2, 1, '/b', 'b', 0, 0, 0)")
+            looped = q_ancestors(cycle, 1)["ancestors"]
+            assert len(looped) == MAX_ANCESTOR_DEPTH + 1, len(looped)
+        finally:
+            cycle.close()
+
         paths = q_search_paths(conn, "team", 200)
         assert sorted(r["id"] for r in paths["results"]) == [2, 3], paths
         assert q_search_paths(conn, "%", 200)["results"] == []  # wildcard escaped
@@ -788,6 +847,10 @@ def _http_self_test(db_path, web_dir):
         assert json.loads(_http_get(base, "/api/children")[2])["count"] == 1
         assert json.loads(_http_get(base, "/api/children?parent_id=1")[2])["count"] == 2
         assert json.loads(_http_get(base, "/api/node?id=3")[2])["node"]["id"] == 3
+        chain = json.loads(_http_get(base, "/api/ancestors?id=3")[2])["ancestors"]
+        assert [a["id"] for a in chain] == [1, 2, 3], chain
+        assert [a["path"] for a in chain] == ["/data", "/data/team", "/data/team/docs"], chain
+        assert chain[1]["has_children"] is True and chain[2]["has_children"] is False
         assert json.loads(_http_get(base, "/api/search/paths?q=team")[2])["count"] == 2
         principal_hits = json.loads(_http_get(base, "/api/search/principals?q=bob")[2])
         assert principal_hits["results"][0]["ace_count"] == 2
@@ -797,6 +860,12 @@ def _http_self_test(db_path, web_dir):
         assert code == 400 and json.loads(body)["error"]["code"] == "invalid_int", (code, body)
         code, _, body = _http_get(base, "/api/node?id=99999")
         assert code == 404 and json.loads(body)["error"]["code"] == "node_not_found", (code, body)
+        code, _, body = _http_get(base, "/api/ancestors?id=99999")
+        assert code == 404 and json.loads(body)["error"]["code"] == "node_not_found", (code, body)
+        code, _, body = _http_get(base, "/api/ancestors?id=abc")
+        assert code == 400 and json.loads(body)["error"]["code"] == "invalid_int", (code, body)
+        code, _, body = _http_get(base, "/api/ancestors")
+        assert code == 400 and json.loads(body)["error"]["code"] == "missing_param", (code, body)
         code, _, body = _http_get(base, "/api/search/paths")
         assert code == 400 and json.loads(body)["error"]["code"] == "missing_param", (code, body)
         code, _, body = _http_get(base, "/api/unknown")

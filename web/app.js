@@ -10,6 +10,7 @@
     status: '/api/status',
     children: '/api/children',
     node: '/api/node',
+    ancestors: '/api/ancestors',
     searchPaths: '/api/search/paths',
     searchPrincipals: '/api/search/principals',
     principal: '/api/principal'
@@ -510,6 +511,10 @@
   var treeEl = $('tree');
   var detailEl = $('detail-pane');
   var selectedNodeId = null;
+  var rootsUl = null;
+  var rootsReady = false;
+  var rootsPending = null;
+  var revealToken = 0;
 
   function loadChildrenPage(parentId) {
     var params = (parentId === undefined || parentId === null) ? {} : { parent_id: parentId };
@@ -539,8 +544,11 @@
 
   function loadChildrenInto(ul, parentId) {
     clear(ul);
+    ul.dataset.loaded = 'true';
     ul.appendChild(el('li', { class: 'tree-state', text: 'Loading\u2026' }));
-    loadChildrenPage(parentId).then(function (page) {
+    // Returns the page on success and null on failure (after rendering the
+    // inline error), so callers can await and chain the lazy load.
+    return loadChildrenPage(parentId).then(function (page) {
       clear(ul);
       if (page.children.length) {
         page.children.forEach(function (k) { ul.appendChild(renderTreeNode(k)); });
@@ -548,6 +556,7 @@
         ul.appendChild(el('li', { class: 'tree-state', text: 'No subfolders.' }));
       }
       if (page.truncated) ul.appendChild(truncationRow());
+      return page;
     }, function (err) {
       clear(ul);
       ul.appendChild(el('li', null, [
@@ -559,6 +568,7 @@
           })
         ])
       ]));
+      return null;
     });
   }
 
@@ -628,15 +638,173 @@
   function loadRoots() {
     selectedNodeId = null;
     clear(treeEl);
-    var ul = el('ul', { class: 'tree-list' });
-    treeEl.appendChild(ul);
-    loadChildrenInto(ul, undefined);
+    rootsUl = el('ul', { class: 'tree-list' });
+    treeEl.appendChild(rootsUl);
+    rootsReady = false;
+    rootsPending = loadChildrenInto(rootsUl, undefined).then(function (page) {
+      rootsReady = page !== null;
+      rootsPending = null;
+      return rootsReady;
+    });
+    return rootsPending;
+  }
+
+  // Reuse the roots already in the tree; only (re)load when there is nothing
+  // loaded and nothing in flight. Resolves to true once roots are present.
+  function ensureRoots() {
+    if (rootsReady) return Promise.resolve(true);
+    if (rootsPending) return rootsPending;
+    return loadRoots();
   }
 
   function selectNode(id) {
     selectedNodeId = id;
     updateAriaCurrent();
     showNodeDetail(id);
+  }
+
+  // -- reveal a path-search result in the tree ----------------------------
+
+  function treeButton(id) {
+    var buttons = treeEl.querySelectorAll('.node-select');
+    for (var i = 0; i < buttons.length; i++) {
+      if (buttons[i].dataset.nodeId !== '' && buttons[i].dataset.nodeId === String(id)) {
+        return buttons[i];
+      }
+    }
+    return null;
+  }
+
+  function treeItemOf(button) {
+    return button.closest ? button.closest('li.tree-item') : null;
+  }
+
+  // The <ul> holding a row's children, created on demand if the row was drawn
+  // without one.
+  function childListOf(button) {
+    var li = treeItemOf(button);
+    if (!li) return null;
+    for (var i = 0; i < li.children.length; i++) {
+      var child = li.children[i];
+      if (child.tagName === 'UL' && child.className.indexOf('tree-list') !== -1) return child;
+    }
+    var ul = el('ul', { class: 'tree-list', hidden: true });
+    li.appendChild(ul);
+    return ul;
+  }
+
+  // Open a row and await its children, so the next chain step can find them.
+  function expandRow(button) {
+    var li = treeItemOf(button);
+    var ul = childListOf(button);
+    if (!li || !ul) return Promise.reject(new Error('This tree row cannot be expanded.'));
+    ul.hidden = false;
+    var toggle = li.querySelector('button.tree-toggle');
+    if (toggle) setToggleState(toggle, button.textContent, true);
+    if (ul.dataset.loaded === 'true') return Promise.resolve();
+    return loadChildrenInto(ul, button.dataset.nodeId).then(function (page) {
+      if (page === null) {
+        throw new Error('Could not load subfolders of ' + button.textContent + '.');
+      }
+    });
+  }
+
+  // Expand one parent, then make sure the known chain child is in its list.
+  // The children list can be truncated server-side, so insert the node the
+  // chain already knows about rather than failing the reveal.
+  function revealStep(token, parent, child) {
+    return function () {
+      if (token !== revealToken) return;
+      var parentButton = treeButton(nodeId(parent));
+      if (!parentButton) {
+        throw new Error('Folder ' + (nodeName(parent) || nodeId(parent)) + ' is not in the tree.');
+      }
+      return expandRow(parentButton).then(function () {
+        if (token !== revealToken) return;
+        var childId = nodeId(child);
+        if (!treeButton(childId)) {
+          var ul = childListOf(parentButton);
+          if (ul) ul.appendChild(renderTreeNode(child));
+        }
+      });
+    };
+  }
+
+  function revealSlot(container) {
+    var slot = container.querySelector('.reveal-status');
+    if (!slot) {
+      slot = el('div', { class: 'reveal-status' });
+      container.insertBefore(slot, container.firstChild);
+    }
+    return slot;
+  }
+
+  function revealLoading(container, text) {
+    var slot = revealSlot(container);
+    clear(slot);
+    slot.appendChild(el('p', { class: 'state state-loading', attrs: { role: 'status' }, text: text }));
+  }
+
+  function revealDone(container) {
+    var slot = container.querySelector('.reveal-status');
+    if (slot && slot.parentNode) slot.parentNode.removeChild(slot);
+  }
+
+  function revealError(container, text, retry) {
+    var slot = revealSlot(container);
+    clear(slot);
+    slot.appendChild(el('div', { class: 'state state-error', attrs: { role: 'alert' } }, [
+      el('p', { text: text }),
+      retry ? el('button', { class: 'button', type: 'button', text: 'Retry', onclick: retry }) : null
+    ]));
+  }
+
+  // Fetch the ancestor chain once, then expand branch by branch until the
+  // target is selected. A later click supersedes an earlier one via the token.
+  function revealNodeInTree(result) {
+    var container = $('path-search-results');
+    var id = nodeId(result);
+    var label = (result && typeof result === 'object')
+      ? asText(pick(result, ['path', 'name', 'label', 'value', 'full_path']))
+      : asText(result);
+    if (id === undefined) {
+      revealError(container, 'This result has no node id, so it cannot be revealed in the tree.');
+      return Promise.resolve();
+    }
+    var token = ++revealToken;
+    revealLoading(container, 'Revealing ' + label + '\u2026');
+    return fetchJSON(API.ancestors, { id: id }).then(function (data) {
+      if (token !== revealToken) return;
+      var chain = arr(firstDefined([data], ['ancestors', 'chain', 'nodes', 'items', 'results']));
+      if (!chain.length) throw new Error('The server returned no ancestor chain.');
+      return ensureRoots().then(function (ok) {
+        if (token !== revealToken) return;
+        if (!ok) throw new Error('The tree could not be loaded.');
+        // The chain starts at a root, which may be missing from a truncated
+        // root list; add it before expanding anything.
+        if (!treeButton(nodeId(chain[0])) && rootsUl) rootsUl.appendChild(renderTreeNode(chain[0]));
+        var seq = Promise.resolve();
+        for (var i = 0; i < chain.length - 1; i++) {
+          seq = seq.then(revealStep(token, chain[i], chain[i + 1]));
+        }
+        return seq;
+      });
+    }).then(function () {
+      if (token !== revealToken) return;
+      selectNode(id);
+      var button = treeButton(id);
+      if (!button) throw new Error('Node ' + id + ' is not in the tree.');
+      button.focus();
+      if (typeof button.scrollIntoView === 'function') {
+        button.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+      revealDone(container);
+    }, function (err) {
+      if (token !== revealToken) return;
+      revealError(container, 'Could not reveal this result: ' + err.message, function () {
+        revealNodeInTree(result);
+      });
+    });
   }
 
   function showNodeDetail(id) {
@@ -791,7 +959,7 @@
         if (id !== undefined) {
           li.appendChild(el('button', {
             class: 'link-button', type: 'button', text: label,
-            onclick: function () { selectNode(id); }
+            onclick: function () { revealNodeInTree(r); }
           }));
         } else {
           li.appendChild(el('span', { class: 'result-static', text: label }));
